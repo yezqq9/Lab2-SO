@@ -1,0 +1,11 @@
+# retardo por movimiento, en milisegundos
+retardo_min_ms=50
+retardo_max_ms=300
+
+# semilla aleatoria
+semilla=42
+
+# posiciones iniciales (opcional), formato fila,columna
+# si se definen, deben ser 1 puma y 12 perros
+# puma=fila,columna
+# perro=fila,columna
