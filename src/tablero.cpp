@@ -1,6 +1,4 @@
 #include "tablero.hpp"
-#include <cstdlib>
-
 using namespace std;
 
 bool es_casilla_valida(int fila,int columna){
@@ -44,10 +42,8 @@ void tablero_iniciar(Tablero& tablero,const Configuracion& config){
     }
 
     if(config.usar_posiciones_iniciales && (int)config.perros_iniciales.size()==TOTAL_PERROS){
-        tablero.posicion_puma=config.puma_inicial;
-        tablero.celdas[ 
-            tablero.posicion_puma.fila
-        ][tablero.posicion_puma.columna]=Casilla::Puma;
+                tablero.posicion_puma=config.puma_inicial;
+        tablero.celdas[tablero.posicion_puma.fila][tablero.posicion_puma.columna]=Casilla::Puma;
 
         for(int i=0;i<TOTAL_PERROS;i++){
             tablero.posicion_perros[i]=config.perros_iniciales[i];

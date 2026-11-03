@@ -215,7 +215,15 @@ void* hilo_juez(void* arg){
 
     cout<<"\n[mesa "<<m.id<<"] inicia partida\n"<<tablero_a_texto(m.tablero)<<flush;
 
+    if(tablero_puma_acorralado(m.tablero)){
+        m.ganador=Ganador::Perros;
+        m.motivo_fin=MotivoFin::Victoria;
+        m.detener=true;
+        cout<<"[mesa "<<m.id<<"] fin: ganan los perros (cliente "<<m.jugador_perros.id<<")\n"<<flush;
+    }
+
     int vistos=0;
+    
     while(!m.detener){
         pthread_mutex_lock(&m.candado_eventos);
         while(!m.detener && !m.abandono_puma && !m.abandono_perros && m.cantidad_eventos==vistos){
@@ -247,8 +255,8 @@ void* hilo_juez(void* arg){
             int cap=m.tablero.perros_capturados;
             pthread_mutex_unlock(&m.tablero.candado);
 
-            cout<<"\n[mesa "<<m.id<<"] "<<ev<<" (capturados: "<<cap<<"/"<<CAPTURAS_PARA_GANAR<<")\n";
-            cout<<tablero_a_texto(m.tablero)<<flush;
+            string salida="\n[mesa "+to_string(m.id)+"] "+ev+" (capturados: "+to_string(cap)+"/"+to_string(CAPTURAS_PARA_GANAR)+")\n"+tablero_a_texto(m.tablero);
+            cout<<salida<<flush;
 
             if(cap>=CAPTURAS_PARA_GANAR){
                 m.ganador=Ganador::Puma;
