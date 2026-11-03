@@ -1,7 +1,15 @@
 #include "servidor.hpp"
+#include "mesa.hpp"
 #include <fstream>
 #include <iostream>
+#include <cstdio>
+#include <cstdlib>
+#include <signal.h>
+#include <unistd.h>
 using namespace std;
+
+static Servidor *servidor_global=nullptr;
+static vector<Mesa*> terminadas;
 
 static string limpiar(string s){
     size_t ini=s.find_first_not_of(" \t\r\n");
@@ -123,4 +131,130 @@ bool configuracion_cargar(const string &ruta,Configuracion &config){
 
     config=nueva;
     return true;
+}
+
+// en el manejador solo se cambia la variable, lo demas lo hace el servidor
+static void manejar_sigint(int){
+    if(servidor_global) servidor_global->aceptando_clientes=false;
+}
+
+void instalar_manejador_sigint(Servidor *servidor){
+    servidor_global=servidor;
+    struct sigaction accion={};
+    accion.sa_handler=manejar_sigint;
+    sigemptyset(&accion.sa_mask);
+    // sin SA_RESTART para que el sem_wait se corte con el ctrl+c
+    accion.sa_flags=0;
+    sigaction(SIGINT,&accion,nullptr);
+}
+
+void servidor_iniciar(Servidor &servidor,int total_clientes,int max_mesas,const Configuracion &config){
+    servidor.total_clientes=total_clientes;
+    servidor.max_mesas=max_mesas;
+    servidor.config=config;
+    servidor.aceptando_clientes=true;
+    servidor.partidas_terminadas=0;
+    if(sem_init(&servidor.cupos_mesas,0,max_mesas)!=0){
+        perror("sem_init");
+        exit(1);
+    }
+    pthread_mutex_init(&servidor.candado_mesas,nullptr);
+}
+
+void servidor_detener(Servidor &servidor){
+    servidor.aceptando_clientes=false;
+    pthread_mutex_lock(&servidor.candado_mesas);
+    for(size_t i=0;i<servidor.mesas_activas.size();i++){
+        mesa_pedir_parada(servidor.mesas_activas[i]);
+    }
+    pthread_mutex_unlock(&servidor.candado_mesas);
+}
+
+// el juez no puede hacerse join a si mismo, por eso el servidor las une despues
+static void limpiar_terminadas(Servidor &servidor){
+    pthread_mutex_lock(&servidor.candado_mesas);
+    vector<Mesa*> lista=terminadas;
+    terminadas.clear();
+    pthread_mutex_unlock(&servidor.candado_mesas);
+
+    for(size_t i=0;i<lista.size();i++){
+        mesa_esperar_fin(lista[i]);
+        mesa_destruir(lista[i]);
+    }
+}
+
+void servidor_mesa_terminada(void *contexto,Mesa *mesa){
+    Servidor *servidor=(Servidor*)contexto;
+    pthread_mutex_lock(&servidor->candado_mesas);
+    for(size_t i=0;i<servidor->mesas_activas.size();i++){
+        if(servidor->mesas_activas[i]==mesa){
+            servidor->mesas_activas.erase(servidor->mesas_activas.begin()+i);
+            break;
+        }
+    }
+    terminadas.push_back(mesa);
+    servidor->partidas_terminadas++;
+    pthread_mutex_unlock(&servidor->candado_mesas);
+    sem_post(&servidor->cupos_mesas);
+}
+
+void servidor_ejecutar(Servidor &servidor){
+    srand(servidor.config.semilla);
+    int pares=servidor.total_clientes/2;
+    int hechos=0;
+    cout<<"llegan "<<servidor.total_clientes<<" clientes"<<endl;
+
+    for(int i=0;i<pares && servidor.aceptando_clientes;i++){
+        Jugador puma={2*i+1,Rol::Puma};
+        Jugador perros={2*i+2,Rol::Perros};
+
+        // los clientes llegan con un tiempo distinto cada vez
+        usleep(rand()%200*1000);
+        if(!servidor.aceptando_clientes) break;
+
+        // si las M mesas estan ocupadas se espera aca sin gastar cpu
+        int resultado=sem_wait(&servidor.cupos_mesas);
+        if(!servidor.aceptando_clientes){
+            // devuelvo el cupo para que el conteo final de destruir cuadre
+            if(resultado==0) sem_post(&servidor.cupos_mesas);
+            break;
+        }
+
+        limpiar_terminadas(servidor);
+        Mesa *mesa=mesa_crear(i+1,servidor.config,puma,perros,servidor_mesa_terminada,&servidor);
+        if(mesa==nullptr){
+            cerr<<"no se pudo crear la mesa "<<i+1<<endl;
+            sem_post(&servidor.cupos_mesas);
+            break;
+        }
+
+        // se agrega antes de iniciar porque la mesa puede terminar muy rapido
+        pthread_mutex_lock(&servidor.candado_mesas);
+        servidor.mesas_activas.push_back(mesa);
+        pthread_mutex_unlock(&servidor.candado_mesas);
+
+        cout<<"mesa "<<mesa->id<<": cliente "<<puma.id<<" (puma) contra cliente "<<perros.id<<" (perros)"<<endl;
+        mesa_iniciar(mesa);
+        hechos++;
+    }
+
+    if(!servidor.aceptando_clientes){
+        cout<<"ctrl+c: no se aceptan mas clientes, se detienen las mesas"<<endl;
+        servidor_detener(servidor);
+    }
+    cout<<"partidas iniciadas: "<<hechos<<", clientes sin jugar: "<<servidor.total_clientes-2*hechos<<endl;
+}
+
+void servidor_destruir(Servidor &servidor){
+    // si vuelven los M cupos es porque todas las mesas terminaron
+    for(int i=0;i<servidor.max_mesas;i++){
+        while(sem_wait(&servidor.cupos_mesas)!=0){
+            // un ctrl+c mientras se espera tambien avisa a las mesas
+            if(!servidor.aceptando_clientes) servidor_detener(servidor);
+        }
+    }
+    limpiar_terminadas(servidor);
+    sem_destroy(&servidor.cupos_mesas);
+    pthread_mutex_destroy(&servidor.candado_mesas);
+    servidor_global=nullptr;
 }
