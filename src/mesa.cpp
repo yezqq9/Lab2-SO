@@ -6,292 +6,278 @@
 
 using namespace std;
 
-void esperar_delay(const Configuracion* cfg){
-    int min_ms=50;
-    int max_ms=300;
-    if(cfg!=NULL){
-        min_ms=cfg->retardo_min_ms;
-        max_ms=cfg->retardo_max_ms;
-    }
+static void dormir_ficha(const Configuracion& cfg,unsigned int& semilla){
+    int min_ms=cfg.retardo_min_ms;
+    int max_ms=cfg.retardo_max_ms;
     if(max_ms<min_ms){
         max_ms=min_ms;
     }
-    int t_espera=min_ms+(rand()%(max_ms-min_ms+1));
-    usleep(t_espera*1000);
+    int espera=min_ms+(rand_r(&semilla)%(max_ms-min_ms+1));
+    usleep(espera*1000);
 }
 
-void* fn_perro(void* arg){
-    Ficha* perro=(Ficha*)arg;
-    Mesa* m=perro->mesa;
-    Tablero* t=&m->tablero;
+Mesa* mesa_crear(int id,const Configuracion& config,Jugador puma,Jugador perros,AlTerminarMesa al_terminar,void* contexto){
+    if(config.usar_posiciones_iniciales){
+        if(!es_casilla_valida(config.puma_inicial.fila,config.puma_inicial.columna)){
+            return nullptr;
+        }
+        for(size_t i=0;i<config.perros_iniciales.size();i++){
+            if(!es_casilla_valida(config.perros_iniciales[i].fila,config.perros_iniciales[i].columna)){
+                return nullptr;
+            }
+        }
+    }
 
-    while(true){
-        esperar_delay(m->cfg);
+    Mesa* mesa=new Mesa();
+    Mesa& m=*mesa;
 
-        pthread_mutex_lock(&t->candado);
-        if(!m->activa || m->parada_pedida || !perro->activa){
-            pthread_mutex_unlock(&t->candado);
-            break;
+    m.id=id;
+    m.config=config;
+    m.jugador_puma=puma;
+    m.jugador_perros=perros;
+    m.detener=false;
+    m.abandono_puma=false;
+    m.abandono_perros=false;
+    m.cantidad_eventos=0;
+    m.ultimo_evento="";
+    m.ganador=Ganador::Ninguno;
+    m.motivo_fin=MotivoFin::Interrupcion;
+    m.al_terminar=al_terminar;
+    m.contexto_servidor=contexto;
+
+    pthread_mutex_init(&m.candado_eventos,nullptr);
+    pthread_cond_init(&m.hay_evento,nullptr);
+    tablero_iniciar(m.tablero,config);
+
+    return mesa;
+}
+
+void registrar_evento(Mesa* mesa,const string& texto){
+    Mesa& m=*mesa;
+    pthread_mutex_lock(&m.candado_eventos);
+    m.cantidad_eventos++;
+    m.ultimo_evento=texto;
+    pthread_cond_signal(&m.hay_evento);
+    pthread_mutex_unlock(&m.candado_eventos);
+}
+
+void mesa_iniciar(Mesa* mesa){
+    pthread_create(&mesa->hilo_juez,nullptr,hilo_juez,mesa);
+}
+
+void mesa_pedir_parada(Mesa* mesa){
+    Mesa& m=*mesa;
+    m.detener=true;
+    pthread_mutex_lock(&m.candado_eventos);
+    pthread_cond_signal(&m.hay_evento);
+    pthread_mutex_unlock(&m.candado_eventos);
+}
+
+void mesa_reportar_abandono(Mesa* mesa,Rol rol){
+    Mesa& m=*mesa;
+    if(rol==Rol::Puma){
+        m.abandono_puma=true;
+    }else{
+        m.abandono_perros=true;
+    }
+    pthread_mutex_lock(&m.candado_eventos);
+    pthread_cond_signal(&m.hay_evento);
+    pthread_mutex_unlock(&m.candado_eventos);
+}
+
+void mesa_esperar_fin(Mesa* mesa){
+    pthread_join(mesa->hilo_juez,nullptr);
+}
+
+void mesa_destruir(Mesa* mesa){
+    Mesa& m=*mesa;
+    tablero_destruir(m.tablero);
+    pthread_mutex_destroy(&m.candado_eventos);
+    pthread_cond_destroy(&m.hay_evento);
+    delete mesa;
+}
+
+void* hilo_perro(void* arg){
+    ArgumentosFicha& info=*(ArgumentosFicha*)arg;
+    Mesa& m=*info.mesa;
+    int idx=info.indice;
+    int df[4]={-1,1,0,0};
+    int dc[4]={0,0,-1,1};
+
+    while(!m.detener){
+        dormir_ficha(m.config,info.semilla);
+        if(m.detener) break;
+
+        pthread_mutex_lock(&m.tablero.candado);
+        bool vivo=m.tablero.perro_vivo[idx];
+        Posicion actual=m.tablero.posicion_perros[idx];
+        pthread_mutex_unlock(&m.tablero.candado);
+
+        if(!vivo) break;
+
+        int orden[4]={0,1,2,3};
+        for(int i=0;i<4;i++){
+            int r=rand_r(&info.semilla)%4;
+            int tmp=orden[i];
+            orden[i]=orden[r];
+            orden[r]=tmp;
         }
 
-        int op_f[4];
-        int op_c[4];
-        int cant=0;
+        for(int i=0;i<4;i++){
+            int d=orden[i];
+            Posicion dest={actual.fila+df[d],actual.columna+dc[d]};
+            if(tablero_mover_perro(m.tablero,idx,dest)){
+                string msg="perro "+to_string(idx+1)+" se mueve a ("+to_string(dest.fila)+","+to_string(dest.columna)+")";
+                registrar_evento(&m,msg);
+                break;
+            }
+        }
+    }
+    return nullptr;
+}
 
-        for(int f=0;f<7;f++){
-            for(int c=0;c<5;c++){
-                if(son_adyacentes(perro->fila,perro->col,f,c) && t->casillas[f][c]==VACIA){
-                    op_f[cant]=f;
-                    op_c[cant]=c;
-                    cant++;
+void* hilo_puma(void* arg){
+    ArgumentosFicha& info=*(ArgumentosFicha*)arg;
+    Mesa& m=*info.mesa;
+    int df[4]={-1,1,0,0};
+    int dc[4]={0,0,-1,1};
+
+    while(!m.detener){
+        dormir_ficha(m.config,info.semilla);
+        if(m.detener) break;
+
+        pthread_mutex_lock(&m.tablero.candado);
+        Posicion actual=m.tablero.posicion_puma;
+        pthread_mutex_unlock(&m.tablero.candado);
+
+        int orden[4]={0,1,2,3};
+        for(int i=0;i<4;i++){
+            int r=rand_r(&info.semilla)%4;
+            int tmp=orden[i];
+            orden[i]=orden[r];
+            orden[r]=tmp;
+        }
+
+        bool movio=false;
+        // primero intenta comer saltando un perro
+        for(int i=0;i<4;i++){
+            int d=orden[i];
+            Posicion salto={actual.fila+2*df[d],actual.columna+2*dc[d]};
+            int comido=-1;
+            if(tablero_saltar_puma(m.tablero,salto,comido)){
+                string msg="puma salta a ("+to_string(salto.fila)+","+to_string(salto.columna)+") y captura al perro "+to_string(comido+1);
+                registrar_evento(&m,msg);
+                movio=true;
+                break;
+            }
+        }
+
+        // si no pudo saltar, intenta moverse a una casilla vacia
+        if(!movio){
+            for(int i=0;i<4;i++){
+                int d=orden[i];
+                Posicion dest={actual.fila+df[d],actual.columna+dc[d]};
+                if(tablero_mover_puma(m.tablero,dest)){
+                    string msg="puma se mueve a ("+to_string(dest.fila)+","+to_string(dest.columna)+")";
+                    registrar_evento(&m,msg);
+                    break;
                 }
             }
         }
-
-        if(cant>0){
-            int idx=rand()%cant;
-            int nf=op_f[idx];
-            int nc=op_c[idx];
-
-            t->casillas[perro->fila][perro->col]=VACIA;
-            t->casillas[nf][nc]=PERRO;
-            perro->fila=nf;
-            perro->col=nc;
-            pthread_cond_signal(&m->cond_juez);
-        }
-
-        pthread_mutex_unlock(&t->candado);
     }
-    return NULL;
+    return nullptr;
 }
 
-void* fn_puma(void* arg){
-    Ficha* puma=(Ficha*)arg;
-    Mesa* m=puma->mesa;
-    Tablero* t=&m->tablero;
+void* hilo_juez(void* arg){
+    Mesa& m=*(Mesa*)arg;
 
-    while(true){
-        esperar_delay(m->cfg);
+    ArgumentosFicha arg_puma={&m,0,m.config.semilla+100+(unsigned int)m.id};
+    ArgumentosFicha args_perros[TOTAL_PERROS];
 
-        pthread_mutex_lock(&t->candado);
-        if(!m->activa || m->parada_pedida){
-            pthread_mutex_unlock(&t->candado);
+    bool puma_creado=false;
+    int perros_creados=0;
+
+    if(pthread_create(&m.hilo_puma,nullptr,hilo_puma,&arg_puma)==0){
+        puma_creado=true;
+    }else{
+        mesa_reportar_abandono(&m,Rol::Puma);
+    }
+
+    for(int i=0;i<TOTAL_PERROS;i++){
+        args_perros[i]={&m,i,m.config.semilla+200+(unsigned int)(m.id*20+i)};
+        if(pthread_create(&m.hilos_perros[i],nullptr,hilo_perro,&args_perros[i])==0){
+            perros_creados++;
+        }else{
+            mesa_reportar_abandono(&m,Rol::Perros);
+            break;
+        }
+    }
+
+    cout<<"\n[mesa "<<m.id<<"] inicia partida\n"<<tablero_a_texto(m.tablero)<<flush;
+
+    int vistos=0;
+    while(!m.detener){
+        pthread_mutex_lock(&m.candado_eventos);
+        while(!m.detener && !m.abandono_puma && !m.abandono_perros && m.cantidad_eventos==vistos){
+            pthread_cond_wait(&m.hay_evento,&m.candado_eventos);
+        }
+        int actual=m.cantidad_eventos;
+        string ev=m.ultimo_evento;
+        pthread_mutex_unlock(&m.candado_eventos);
+
+        if(m.abandono_puma){
+            m.ganador=Ganador::Perros;
+            m.motivo_fin=MotivoFin::Abandono;
+            m.detener=true;
+            cout<<"\n[mesa "<<m.id<<"] abandono del puma. ganan los perros\n"<<flush;
             break;
         }
 
-        int pf=puma->fila;
-        int pc=puma->col;
-        bool salto=false;
+        if(m.abandono_perros){
+            m.ganador=Ganador::Puma;
+            m.motivo_fin=MotivoFin::Abandono;
+            m.detener=true;
+            cout<<"\n[mesa "<<m.id<<"] abandono de los perros. gana el puma\n"<<flush;
+            break;
+        }
 
-        // revisar primero si puede saltar a un perro
-        for(int fm=0;fm<7;fm++){
-            for(int cm=0;cm<5;cm++){
-                if(son_adyacentes(pf,pc,fm,cm) && t->casillas[fm][cm]==PERRO){
-                    int f2=fm+(fm-pf);
-                    int c2=cm+(cm-pc);
+        if(actual>vistos){
+            vistos=actual;
+            pthread_mutex_lock(&m.tablero.candado);
+            int cap=m.tablero.perros_capturados;
+            pthread_mutex_unlock(&m.tablero.candado);
 
-                    if(es_salto_valido(t,pf,pc,fm,cm,f2,c2)){
-                        t->casillas[pf][pc]=VACIA;
-                        t->casillas[fm][cm]=VACIA;
-                        t->casillas[f2][c2]=PUMA;
-                        puma->fila=f2;
-                        puma->col=c2;
-                        t->perros_capturados++;
+            cout<<"\n[mesa "<<m.id<<"] "<<ev<<" (capturados: "<<cap<<"/"<<CAPTURAS_PARA_GANAR<<")\n";
+            cout<<tablero_a_texto(m.tablero)<<flush;
 
-                        for(int i=0;i<12;i++){
-                            if(m->perros[i].activa && m->perros[i].fila==fm && m->perros[i].col==cm){
-                                m->perros[i].activa=false;
-                                break;
-                            }
-                        }
-                        salto=true;
-                        pthread_cond_signal(&m->cond_juez);
-                        break;
-                    }
-                }
+            if(cap>=CAPTURAS_PARA_GANAR){
+                m.ganador=Ganador::Puma;
+                m.motivo_fin=MotivoFin::Victoria;
+                m.detener=true;
+                cout<<"[mesa "<<m.id<<"] fin: gana el puma (cliente "<<m.jugador_puma.id<<")\n"<<flush;
+                break;
             }
-            if(salto) break;
-        }
 
-        if(!salto){
-            int op_f[4];
-            int op_c[4];
-            int cant=0;
-
-            for(int f=0;f<7;f++){
-                for(int c=0;c<5;c++){
-                    if(son_adyacentes(pf,pc,f,c) && t->casillas[f][c]==VACIA){
-                        op_f[cant]=f;
-                        op_c[cant]=c;
-                        cant++;
-                    }
-                }
-            }
-
-            if(cant>0){
-                int idx=rand()%cant;
-                int nf=op_f[idx];
-                int nc=op_c[idx];
-
-                t->casillas[pf][pc]=VACIA;
-                t->casillas[nf][nc]=PUMA;
-                puma->fila=nf;
-                puma->col=nc;
-                pthread_cond_signal(&m->cond_juez);
-            }
-        }
-
-        pthread_mutex_unlock(&t->candado);
-    }
-    return NULL;
-}
-
-void* fn_juez(void* arg){
-    Mesa* m=(Mesa*)arg;
-    Tablero* t=&m->tablero;
-
-    pthread_mutex_lock(&t->candado);
-    tablero_imprimir(t,m->id_mesa,m->id_jugador_puma,m->id_jugador_perros,"Empieza la partida");
-    pthread_mutex_unlock(&t->candado);
-
-    if(pthread_create(&m->puma.hilo,NULL,fn_puma,&m->puma)!=0){
-        pthread_mutex_lock(&t->candado);
-        m->fallo_ficha=true;
-        m->id_jugador_fallido=m->id_jugador_puma;
-        m->activa=false;
-        pthread_mutex_unlock(&t->candado);
-    }
-
-    int creados=0;
-    for(int i=0;i<12;i++){
-        if(pthread_create(&m->perros[i].hilo,NULL,fn_perro,&m->perros[i])!=0){
-            pthread_mutex_lock(&t->candado);
-            m->fallo_ficha=true;
-            m->id_jugador_fallido=m->id_jugador_perros;
-            m->activa=false;
-            pthread_mutex_unlock(&t->candado);
-            break;
-        }
-        creados++;
-    }
-
-    pthread_mutex_lock(&t->candado);
-    while(m->activa && !m->parada_pedida){
-        pthread_cond_wait(&m->cond_juez,&t->candado);
-
-        if(m->parada_pedida){
-            tablero_imprimir(t,m->id_mesa,m->id_jugador_puma,m->id_jugador_perros,"Partida cortada por servidor");
-            m->activa=false;
-            break;
-        }
-
-        if(m->fallo_ficha){
-            if(m->id_jugador_fallido==m->id_jugador_puma){
-                tablero_imprimir(t,m->id_mesa,m->id_jugador_puma,m->id_jugador_perros,"Abandono Puma. Ganan Perros");
-            }else{
-                tablero_imprimir(t,m->id_mesa,m->id_jugador_puma,m->id_jugador_perros,"Abandono Perros. Gana Puma");
-            }
-            m->activa=false;
-            break;
-        }
-
-        tablero_imprimir(t,m->id_mesa,m->id_jugador_puma,m->id_jugador_perros,"Jugada");
-
-        if(t->perros_capturados>=6){
-            tablero_imprimir(t,m->id_mesa,m->id_jugador_puma,m->id_jugador_perros,"Fin: Gana el Puma");
-            m->activa=false;
-            break;
-        }
-
-        if(puma_acorralado(t,m->puma.fila,m->puma.col)){
-            tablero_imprimir(t,m->id_mesa,m->id_jugador_puma,m->id_jugador_perros,"Fin: Ganan los Perros");
-            m->activa=false;
-            break;
-        }
-    }
-    m->activa=false;
-    pthread_mutex_unlock(&t->candado);
-
-    // esperar que salgan las fichas antes de avisar que termino la mesa
-    if(!m->fallo_ficha || m->id_jugador_fallido!=m->id_jugador_puma){
-        pthread_join(m->puma.hilo,NULL);
-    }
-    for(int i=0;i<creados;i++){
-        pthread_join(m->perros[i].hilo,NULL);
-    }
-
-    if(m->al_terminar!=NULL){
-        m->al_terminar(m->id_mesa,m->ctx_servidor);
-    }
-    return NULL;
-}
-
-Mesa* mesa_crear(int id_mesa,int j_puma,int j_perros,const Configuracion* cfg,CallbackFinMesa al_terminar,void* ctx){
-    Mesa* m=new Mesa;
-
-    m->id_mesa=id_mesa;
-    m->id_jugador_puma=j_puma;
-    m->id_jugador_perros=j_perros;
-    m->cfg=cfg;
-    m->activa=true;
-    m->parada_pedida=false;
-    m->fallo_ficha=false;
-    m->id_jugador_fallido=-1;
-    m->al_terminar=al_terminar;
-    m->ctx_servidor=ctx;
-
-    pthread_cond_init(&m->cond_juez,NULL);
-    tablero_iniciar(&m->tablero,cfg);
-
-    int cont=0;
-    for(int f=0;f<7;f++){
-        for(int c=0;c<5;c++){
-            if(m->tablero.casillas[f][c]==PUMA){
-                m->puma.id=0;
-                m->puma.es_puma=true;
-                m->puma.activa=true;
-                m->puma.fila=f;
-                m->puma.col=c;
-                m->puma.mesa=m;
-            }else if(m->tablero.casillas[f][c]==PERRO && cont<12){
-                m->perros[cont].id=cont+1;
-                m->perros[cont].es_puma=false;
-                m->perros[cont].activa=true;
-                m->perros[cont].fila=f;
-                m->perros[cont].col=c;
-                m->perros[cont].mesa=m;
-                cont++;
+            if(tablero_puma_acorralado(m.tablero)){
+                m.ganador=Ganador::Perros;
+                m.motivo_fin=MotivoFin::Victoria;
+                m.detener=true;
+                cout<<"[mesa "<<m.id<<"] fin: ganan los perros (cliente "<<m.jugador_perros.id<<")\n"<<flush;
+                break;
             }
         }
     }
 
-    if(pthread_create(&m->hilo_juez,NULL,fn_juez,m)!=0){
-        tablero_destruir(&m->tablero);
-        pthread_cond_destroy(&m->cond_juez);
-        delete m;
-        return nullptr;
+    m.detener=true;
+    if(puma_creado){
+        pthread_join(m.hilo_puma,nullptr);
+    }
+    for(int i=0;i<perros_creados;i++){
+        pthread_join(m.hilos_perros[i],nullptr);
     }
 
-    return m;
-}
-
-void mesa_pedir_parada(Mesa* m){
-    if(m==NULL) return;
-    pthread_mutex_lock(&m->tablero.candado);
-    m->parada_pedida=true;
-    m->activa=false;
-    pthread_cond_signal(&m->cond_juez);
-    pthread_mutex_unlock(&m->tablero.candado);
-}
-
-void mesa_esperar_fin(Mesa* m){
-    if(m==NULL) return;
-    pthread_join(m->hilo_juez,NULL);
-}
-
-void mesa_destruir(Mesa* m){
-    if(m==NULL) return;
-    tablero_destruir(&m->tablero);
-    pthread_cond_destroy(&m->cond_juez);
-    delete m;
+    if(m.al_terminar!=nullptr){
+        m.al_terminar(m.contexto_servidor,&m);
+    }
+    return nullptr;
 }
