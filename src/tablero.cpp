@@ -42,7 +42,7 @@ void tablero_iniciar(Tablero& tablero,const Configuracion& config){
     }
 
     if(config.usar_posiciones_iniciales && (int)config.perros_iniciales.size()==TOTAL_PERROS){
-                tablero.posicion_puma=config.puma_inicial;
+        tablero.posicion_puma=config.puma_inicial;
         tablero.celdas[tablero.posicion_puma.fila][tablero.posicion_puma.columna]=Casilla::Puma;
 
         for(int i=0;i<TOTAL_PERROS;i++){

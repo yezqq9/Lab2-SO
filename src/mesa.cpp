@@ -223,7 +223,6 @@ void* hilo_juez(void* arg){
     }
 
     int vistos=0;
-    
     while(!m.detener){
         pthread_mutex_lock(&m.candado_eventos);
         while(!m.detener && !m.abandono_puma && !m.abandono_perros && m.cantidad_eventos==vistos){
