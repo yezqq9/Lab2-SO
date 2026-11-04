@@ -1,5 +1,5 @@
 CXX=g++
-CXXFLAGS=-Wall -Wextra -std=c++17 -pthread -g -Iinclude
+CXXFLAGS=-Wall -Wextra -std=c++17 -pthread -g -Iinclude -MMD -MP
 
 fuentes=$(wildcard src/*.cpp)
 objetos=$(fuentes:src/%.cpp=build/%.o)
@@ -17,3 +17,5 @@ clean:
 	rm -rf build torneo
 
 .PHONY: clean
+
+-include $(objetos:.o=.d)
