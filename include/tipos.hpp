@@ -29,6 +29,7 @@ struct Posicion {
 struct Configuracion {
     int retardo_min_ms=50;
     int retardo_max_ms=300;
+    int abandono=0;                     // 0 ninguno, 1 puma, 2 perros
     unsigned int semilla=0;
     bool usar_posiciones_iniciales=false;
     Posicion puma_inicial{3,2};
@@ -72,7 +73,7 @@ struct Mesa {
     pthread_mutex_t candado_eventos;    // protege el contador y el ultimo evento
     pthread_cond_t hay_evento;          // despierta al juez para imprimir
     int cantidad_eventos;
-    std::string ultimo_evento;
+    std::vector<std::string> eventos;
 
     Ganador ganador;
     MotivoFin motivo_fin;

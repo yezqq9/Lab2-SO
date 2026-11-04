@@ -1,0 +1,3 @@
+retardo_min_ms=5
+retardo_max_ms=20
+abandono=puma

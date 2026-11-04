@@ -96,6 +96,14 @@ bool configuracion_cargar(const string &ruta,Configuracion &config){
             }
             else perros.push_back(pos);
         }
+        else if(clave=="abandono"){
+            if(valor=="puma") nueva.abandono=1;
+            else if(valor=="perros") nueva.abandono=2;
+            else{
+                cerr<<"config linea "<<num<<": abandono debe ser puma o perros"<<endl;
+                return false;
+            }
+        }
         else{
             cerr<<"config linea "<<num<<": clave desconocida "<<clave<<endl;
             return false;

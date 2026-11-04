@@ -39,7 +39,6 @@ Mesa* mesa_crear(int id,const Configuracion& config,Jugador puma,Jugador perros,
     m.abandono_puma=false;
     m.abandono_perros=false;
     m.cantidad_eventos=0;
-    m.ultimo_evento="";
     m.ganador=Ganador::Ninguno;
     m.motivo_fin=MotivoFin::Interrupcion;
     m.al_terminar=al_terminar;
@@ -56,7 +55,7 @@ void registrar_evento(Mesa* mesa,const string& texto){
     Mesa& m=*mesa;
     pthread_mutex_lock(&m.candado_eventos);
     m.cantidad_eventos++;
-    m.ultimo_evento=texto;
+    m.eventos.push_back(texto);
     pthread_cond_signal(&m.hay_evento);
     pthread_mutex_unlock(&m.candado_eventos);
 }
@@ -103,10 +102,16 @@ void* hilo_perro(void* arg){
     int idx=info.indice;
     int df[4]={-1,1,0,0};
     int dc[4]={0,0,-1,1};
+    int jugadas=0;
 
     while(!m.detener){
         dormir_ficha(m.config,info.semilla);
         if(m.detener) break;
+        jugadas++;
+        if(m.config.abandono==2 && idx==0 && jugadas>5){
+            mesa_reportar_abandono(&m,Rol::Perros);
+            break;
+        }
 
         pthread_mutex_lock(&m.tablero.candado);
         bool vivo=m.tablero.perro_vivo[idx];
@@ -141,10 +146,16 @@ void* hilo_puma(void* arg){
     Mesa& m=*info.mesa;
     int df[4]={-1,1,0,0};
     int dc[4]={0,0,-1,1};
+    int jugadas=0;
 
     while(!m.detener){
         dormir_ficha(m.config,info.semilla);
         if(m.detener) break;
+        jugadas++;
+        if(m.config.abandono==1 && jugadas>5){
+            mesa_reportar_abandono(&m,Rol::Puma);
+            break;
+        }
 
         pthread_mutex_lock(&m.tablero.candado);
         Posicion actual=m.tablero.posicion_puma;
@@ -222,16 +233,28 @@ void* hilo_juez(void* arg){
         cout<<"[mesa "<<m.id<<"] fin: ganan los perros (cliente "<<m.jugador_perros.id<<")\n"<<flush;
     }
 
-    int vistos=0;
+    // el juez espera eventos, los imprime y revisa si alguien gano
     while(!m.detener){
         pthread_mutex_lock(&m.candado_eventos);
-        while(!m.detener && !m.abandono_puma && !m.abandono_perros && m.cantidad_eventos==vistos){
+        // duerme hasta que haya eventos nuevos, abandono o parada
+        while(!m.detener && !m.abandono_puma && !m.abandono_perros && m.eventos.empty()){
             pthread_cond_wait(&m.hay_evento,&m.candado_eventos);
         }
-        int actual=m.cantidad_eventos;
-        string ev=m.ultimo_evento;
+        // me llevo todos los eventos de una vez y dejo la lista vacia
+        vector<string> lista;
+        lista.swap(m.eventos);
         pthread_mutex_unlock(&m.candado_eventos);
 
+        // imprimo cada evento con su tablero
+        for(size_t i=0;i<lista.size();i++){
+            pthread_mutex_lock(&m.tablero.candado);
+            int cap=m.tablero.perros_capturados;
+            pthread_mutex_unlock(&m.tablero.candado);
+            string salida="\n[mesa "+to_string(m.id)+"] "+lista[i]+" (capturados: "+to_string(cap)+"/"+to_string(CAPTURAS_PARA_GANAR)+")\n"+tablero_a_texto(m.tablero);
+            cout<<salida<<flush;
+        }
+
+        // si el puma abandono, ganan los perros
         if(m.abandono_puma){
             m.ganador=Ganador::Perros;
             m.motivo_fin=MotivoFin::Abandono;
@@ -240,6 +263,7 @@ void* hilo_juez(void* arg){
             break;
         }
 
+        // si los perros abandonaron, gana el puma
         if(m.abandono_perros){
             m.ganador=Ganador::Puma;
             m.motivo_fin=MotivoFin::Abandono;
@@ -248,30 +272,26 @@ void* hilo_juez(void* arg){
             break;
         }
 
-        if(actual>vistos){
-            vistos=actual;
-            pthread_mutex_lock(&m.tablero.candado);
-            int cap=m.tablero.perros_capturados;
-            pthread_mutex_unlock(&m.tablero.candado);
+        pthread_mutex_lock(&m.tablero.candado);
+        int capturados=m.tablero.perros_capturados;
+        pthread_mutex_unlock(&m.tablero.candado);
 
-            string salida="\n[mesa "+to_string(m.id)+"] "+ev+" (capturados: "+to_string(cap)+"/"+to_string(CAPTURAS_PARA_GANAR)+")\n"+tablero_a_texto(m.tablero);
-            cout<<salida<<flush;
+        // el puma gana con 6 capturas o mas
+        if(capturados>=CAPTURAS_PARA_GANAR){
+            m.ganador=Ganador::Puma;
+            m.motivo_fin=MotivoFin::Victoria;
+            m.detener=true;
+            cout<<"[mesa "<<m.id<<"] fin: gana el puma (cliente "<<m.jugador_puma.id<<")\n"<<flush;
+            break;
+        }
 
-            if(cap>=CAPTURAS_PARA_GANAR){
-                m.ganador=Ganador::Puma;
-                m.motivo_fin=MotivoFin::Victoria;
-                m.detener=true;
-                cout<<"[mesa "<<m.id<<"] fin: gana el puma (cliente "<<m.jugador_puma.id<<")\n"<<flush;
-                break;
-            }
-
-            if(tablero_puma_acorralado(m.tablero)){
-                m.ganador=Ganador::Perros;
-                m.motivo_fin=MotivoFin::Victoria;
-                m.detener=true;
-                cout<<"[mesa "<<m.id<<"] fin: ganan los perros (cliente "<<m.jugador_perros.id<<")\n"<<flush;
-                break;
-            }
+        // los perros ganan si el puma no tiene a donde moverse
+        if(tablero_puma_acorralado(m.tablero)){
+            m.ganador=Ganador::Perros;
+            m.motivo_fin=MotivoFin::Victoria;
+            m.detener=true;
+            cout<<"[mesa "<<m.id<<"] fin: ganan los perros (cliente "<<m.jugador_perros.id<<")\n"<<flush;
+            break;
         }
     }
 
