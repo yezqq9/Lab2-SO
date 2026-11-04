@@ -8,9 +8,12 @@
 #include <unistd.h>
 using namespace std;
 
+// el manejador de ctrl+c necesita saber cual es el servidor
 static Servidor *servidor_global=nullptr;
+// mesas que ya terminaron y que el servidor todavia tiene que unir y borrar
 static vector<Mesa*> terminadas;
 
+// le saca los espacios y saltos de linea a los costados de un texto
 static string limpiar(string s){
     size_t ini=s.find_first_not_of(" \t\r\n");
     if(ini==string::npos) return "";
@@ -18,6 +21,7 @@ static string limpiar(string s){
     return s.substr(ini,fin-ini+1);
 }
 
+// pasa un texto a numero, devuelve false si no es numero o es negativo
 static bool leer_numero(string texto,int &n){
     // stoi tira excepcion si no es numero
     try{
@@ -28,6 +32,7 @@ static bool leer_numero(string texto,int &n){
     return n>=0;
 }
 
+// lee una posicion con formato fila,columna
 static bool leer_posicion(string texto,Posicion &pos){
     size_t coma=texto.find(',');
     if(coma==string::npos) return false;
@@ -37,10 +42,12 @@ static bool leer_posicion(string texto,Posicion &pos){
     return pos.fila<FILAS && pos.columna<COLUMNAS;
 }
 
+// dice si dos posiciones son la misma casilla
 static bool son_iguales(Posicion a,Posicion b){
     return a.fila==b.fila && a.columna==b.columna;
 }
 
+// lee el archivo de config linea por linea, si hay un error no cambia nada
 bool configuracion_cargar(const string &ruta,Configuracion &config){
     ifstream archivo(ruta);
     if(!archivo){
@@ -57,11 +64,14 @@ bool configuracion_cargar(const string &ruta,Configuracion &config){
 
     while(getline(archivo,linea)){
         num++;
+        // borro los comentarios que empiezan con #
         size_t com=linea.find('#');
         if(com!=string::npos) linea.erase(com);
         linea=limpiar(linea);
+        // salto las lineas vacias
         if(linea.empty()) continue;
 
+        // cada linea tiene que ser clave=valor
         size_t igual=linea.find('=');
         if(igual==string::npos){
             cerr<<"config linea "<<num<<": falta el ="<<endl;
@@ -72,6 +82,7 @@ bool configuracion_cargar(const string &ruta,Configuracion &config){
         int n=0;
         Posicion pos={0,0};
 
+        // claves que son numeros
         if(clave=="retardo_min_ms" || clave=="retardo_max_ms" || clave=="semilla"){
             if(!leer_numero(valor,n)){
                 cerr<<"config linea "<<num<<": numero invalido"<<endl;
@@ -81,6 +92,7 @@ bool configuracion_cargar(const string &ruta,Configuracion &config){
             else if(clave=="retardo_max_ms") nueva.retardo_max_ms=n;
             else nueva.semilla=n;
         }
+        // posiciones iniciales del puma y de los perros
         else if(clave=="puma" || clave=="perro"){
             if(!leer_posicion(valor,pos)){
                 cerr<<"config linea "<<num<<": posicion invalida, usar fila,columna"<<endl;
@@ -96,6 +108,7 @@ bool configuracion_cargar(const string &ruta,Configuracion &config){
             }
             else perros.push_back(pos);
         }
+        // para probar el abandono: abandono=puma o abandono=perros
         else if(clave=="abandono"){
             if(valor=="puma") nueva.abandono=1;
             else if(valor=="perros") nueva.abandono=2;
@@ -110,6 +123,7 @@ bool configuracion_cargar(const string &ruta,Configuracion &config){
         }
     }
 
+    // el minimo no puede pasar al maximo
     if(nueva.retardo_min_ms>nueva.retardo_max_ms){
         cerr<<"config: el minimo no puede ser mayor al maximo"<<endl;
         return false;
@@ -121,6 +135,7 @@ bool configuracion_cargar(const string &ruta,Configuracion &config){
             cerr<<"config: hay que definir 1 puma y "<<TOTAL_PERROS<<" perros"<<endl;
             return false;
         }
+        // reviso que no haya fichas encima de otras
         for(size_t i=0;i<perros.size();i++){
             if(son_iguales(perros[i],nueva.puma_inicial)){
                 cerr<<"config: un perro esta sobre el puma"<<endl;
@@ -137,6 +152,7 @@ bool configuracion_cargar(const string &ruta,Configuracion &config){
         nueva.perros_iniciales=perros;
     }
 
+    // si llego hasta aca todo estaba bien, recien ahora guardo la config
     config=nueva;
     return true;
 }
@@ -146,6 +162,7 @@ static void manejar_sigint(int){
     if(servidor_global) servidor_global->aceptando_clientes=false;
 }
 
+// deja listo el ctrl+c
 void instalar_manejador_sigint(Servidor *servidor){
     servidor_global=servidor;
     struct sigaction accion={};
@@ -156,12 +173,14 @@ void instalar_manejador_sigint(Servidor *servidor){
     sigaction(SIGINT,&accion,nullptr);
 }
 
+// pone los valores iniciales del servidor
 void servidor_iniciar(Servidor &servidor,int total_clientes,int max_mesas,const Configuracion &config){
     servidor.total_clientes=total_clientes;
     servidor.max_mesas=max_mesas;
     servidor.config=config;
     servidor.aceptando_clientes=true;
     servidor.partidas_terminadas=0;
+    // el semaforo parte en M: son los cupos de mesas libres
     if(sem_init(&servidor.cupos_mesas,0,max_mesas)!=0){
         perror("sem_init");
         exit(1);
@@ -169,6 +188,7 @@ void servidor_iniciar(Servidor &servidor,int total_clientes,int max_mesas,const 
     pthread_mutex_init(&servidor.candado_mesas,nullptr);
 }
 
+// deja de aceptar clientes y le pide a todas las mesas que paren
 void servidor_detener(Servidor &servidor){
     servidor.aceptando_clientes=false;
     pthread_mutex_lock(&servidor.candado_mesas);
@@ -180,34 +200,42 @@ void servidor_detener(Servidor &servidor){
 
 // el juez no puede hacerse join a si mismo, por eso el servidor las une despues
 static void limpiar_terminadas(Servidor &servidor){
+    // me llevo la lista con el candado puesto y la dejo vacia
     pthread_mutex_lock(&servidor.candado_mesas);
     vector<Mesa*> lista=terminadas;
     terminadas.clear();
     pthread_mutex_unlock(&servidor.candado_mesas);
 
+    // fuera del candado hago el join y libero cada mesa
     for(size_t i=0;i<lista.size();i++){
         mesa_esperar_fin(lista[i]);
         mesa_destruir(lista[i]);
     }
 }
 
+// el juez llama a esto cuando termina su partida
 void servidor_mesa_terminada(void *contexto,Mesa *mesa){
     Servidor *servidor=(Servidor*)contexto;
     pthread_mutex_lock(&servidor->candado_mesas);
+    // saco la mesa de las activas
     for(size_t i=0;i<servidor->mesas_activas.size();i++){
         if(servidor->mesas_activas[i]==mesa){
             servidor->mesas_activas.erase(servidor->mesas_activas.begin()+i);
             break;
         }
     }
+    // la dejo en la lista de terminadas para borrarla despues
     terminadas.push_back(mesa);
     servidor->partidas_terminadas++;
     pthread_mutex_unlock(&servidor->candado_mesas);
+    // libero un cupo para que pueda empezar otra mesa
     sem_post(&servidor->cupos_mesas);
 }
 
+// matchmaker: llegan los clientes, se emparejan y se abren las mesas
 void servidor_ejecutar(Servidor &servidor){
     srand(servidor.config.semilla);
+    // cada partida necesita 2 clientes
     int pares=servidor.total_clientes/2;
     int hechos=0;
     cout<<"llegan "<<servidor.total_clientes<<" clientes"<<endl;
@@ -228,6 +256,7 @@ void servidor_ejecutar(Servidor &servidor){
             break;
         }
 
+        // aprovecho de borrar las mesas que ya terminaron
         limpiar_terminadas(servidor);
         Mesa *mesa=mesa_crear(i+1,servidor.config,puma,perros,servidor_mesa_terminada,&servidor);
         if(mesa==nullptr){
@@ -246,6 +275,7 @@ void servidor_ejecutar(Servidor &servidor){
         hechos++;
     }
 
+    // si fue ctrl+c, aviso a las mesas que estan jugando que paren
     if(!servidor.aceptando_clientes){
         cout<<"ctrl+c: no se aceptan mas clientes, se detienen las mesas"<<endl;
         servidor_detener(servidor);
@@ -253,6 +283,7 @@ void servidor_ejecutar(Servidor &servidor){
     cout<<"partidas iniciadas: "<<hechos<<", clientes sin jugar: "<<servidor.total_clientes-2*hechos<<endl;
 }
 
+// espera a que terminen todas las mesas y libera lo del servidor
 void servidor_destruir(Servidor &servidor){
     // si vuelven los M cupos es porque todas las mesas terminaron
     for(int i=0;i<servidor.max_mesas;i++){
