@@ -1,0 +1,16 @@
+retardo_min_ms=5
+retardo_max_ms=20
+semilla=7
+puma=3,2
+perro=6,0
+perro=6,1
+perro=6,2
+perro=6,3
+perro=6,4
+perro=5,0
+perro=5,1
+perro=5,2
+perro=5,3
+perro=5,4
+perro=4,0
+perro=4,4
